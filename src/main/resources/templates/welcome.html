@@ -1,0 +1,344 @@
+<!doctype html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <!-- Latest compiled and minified CSS -->
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+
+    <style type="text/css">
+       canvas {
+           border: 1px solid black;
+       }
+       .invisible {
+           display: none;
+       }
+       .text-center {
+           text-align: center;
+       }
+       div {
+           margin: 10px;
+       }
+       .center-block {
+           display: block;
+           margin: auto;
+       }
+       label {
+           padding-right: 10px;
+           width: 25%;
+           vertical-align: top;
+           font: 16px 'Lucida Grande', sans-serif;
+       }
+   </style>
+
+
+</head>
+<body>
+<div id="container"  >
+    <div class="row">
+        <div class="col-sm-4">
+            <canvas class="center-block" id="canvasOutput" width=320 height=240></canvas>
+
+        </div>
+        <div class="col-sm-4">
+            <canvas class="center-block" id="canvasOutput2" width=320 height=240></canvas>
+        </div>
+    </div>
+
+</div>
+
+<div class="text-center">
+    <input type="checkbox" id="face" name="classifier" value="face" checked>
+    <label for="face">face</label>
+    <input type="checkbox" id="eye" name="cascade" value="eye">
+    <label for="eye">eye</label>
+</div>
+<div class="invisible">
+    <video id="video" class="hidden">Your browser does not support the video tag.</video>
+</div>
+</div>
+<input type="button" value="Start Camera" onclick="startCamera()"> </input>
+<input type="button" value="Stop Camera" onclick="stopCamera()"> </input>
+<input type="button" value="Tak Pic" onclick="takImage()"> </input>
+<input type="button" value="Post" onclick="encodbase64()"> </input>
+</body>
+<script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+<script src="https://threejs.org/examples/js/libs/stats.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.5/dat.gui.min.js"></script>
+
+<!-- jQuery library -->
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+
+<!-- Latest compiled JavaScript -->
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+
+<script>
+    var Module = {
+        wasmBinaryFile: 'https://huningxin.github.io/opencv.js/build/wasm/opencv_js.wasm',
+        preRun: [function() {
+            Module.FS_createPreloadedFile('/', 'haarcascade_eye.xml', 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_eye.xml', true, false);
+            Module.FS_createPreloadedFile('/', 'haarcascade_frontalface_default.xml', 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml', true, false);
+            Module.FS_createPreloadedFile('/', 'haarcascade_profileface.xml', 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_profileface.xml', true, false);
+        }],
+        _main: function() {opencvIsReady();}
+    };
+</script>
+<script async src="https://huningxin.github.io/opencv.js/build/wasm/opencv.js"></script>
+<script type="text/javascript">
+    let videoWidth, videoHeight;
+
+    // whether streaming video from the camera.
+    let streaming = false;
+
+    let video = document.getElementById('video');
+    let canvasOutput = document.getElementById('canvasOutput');
+    let canvasOutput2 = document.getElementById('canvasOutput2');
+
+    let canvasOutputCtx = canvasOutput.getContext('2d');
+    let canvasOutputCtx2 = canvasOutput2.getContext('2d');
+    let stream = null;
+
+    let detectFace = document.getElementById('face');
+    let detectEye = document.getElementById('eye');
+
+    function startCamera() {
+        if (streaming) return;
+        navigator.mediaDevices.getUserMedia({video: true, audio: false})
+            .then(function(s) {
+                stream = s;
+                video.srcObject = s;
+                video.play();
+            })
+            .catch(function(err) {
+                console.log("An error occured! " + err);
+            });
+
+        video.addEventListener("canplay", function(ev){
+            if (!streaming) {
+                videoWidth = video.videoWidth;
+                videoHeight = video.videoHeight;
+                video.setAttribute("width", videoWidth);
+                video.setAttribute("height", videoHeight);
+                canvasOutput.width = videoWidth;
+                canvasOutput.height = videoHeight;
+                streaming = true;
+            }
+            startVideoProcessing();
+        }, false);
+    }
+
+    let faceClassifier = null;
+    let eyeClassifier = null;
+
+    let src = null;
+    let dstC1 = null;
+    let dstC3 = null;
+    let dstC4 = null;
+    let pic = null;
+
+    let canvasInput = null;
+    let canvasInput2 = null;
+    let canvasInputCtx = null;
+
+    let canvasBuffer = null;
+    let canvasBufferCtx = null;
+
+    function startVideoProcessing() {
+        if (!streaming) { console.warn("Please startup your webcam"); return; }
+        stopVideoProcessing();
+        canvasInput = document.createElement('canvas');
+        canvasInput.width = videoWidth;
+        canvasInput.height = videoHeight;
+        canvasInputCtx = canvasInput.getContext('2d');
+
+        canvasBuffer = document.createElement('canvas');
+        canvasBuffer.width = videoWidth;
+        canvasBuffer.height = videoHeight;
+        canvasBufferCtx = canvasBuffer.getContext('2d');
+
+        srcMat = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
+        grayMat = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC1);
+
+        faceClassifier = new cv.CascadeClassifier();
+        faceClassifier.load('haarcascade_frontalface_default.xml');
+
+        eyeClassifier = new cv.CascadeClassifier();
+        eyeClassifier.load('haarcascade_eye.xml');
+
+        requestAnimationFrame(processVideo);
+    }
+
+    function processVideo() {
+        stats.begin();
+        canvasInputCtx.drawImage(video, 0, 0, videoWidth, videoHeight);
+        let imageData = canvasInputCtx.getImageData(0, 0, videoWidth, videoHeight);
+        srcMat.data.set(imageData.data);
+        cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+        let faces = [];
+        let eyes = [];
+        let size;
+        if (detectFace.checked) {
+            let faceVect = new cv.RectVector();
+            let faceMat = new cv.Mat();
+            if (detectEye.checked) {
+                cv.pyrDown(grayMat, faceMat);
+                size = faceMat.size();
+            } else {
+                cv.pyrDown(grayMat, faceMat);
+                cv.pyrDown(faceMat, faceMat);
+                size = faceMat.size();
+            }
+            faceClassifier.detectMultiScale(faceMat, faceVect);
+            for (let i = 0; i < faceVect.size(); i++) {
+                let face = faceVect.get(i);
+
+
+                faces.push(new cv.Rect(face.x, face.y, face.width, face.height));
+
+                if (detectEye.checked) {
+                    let eyeVect = new cv.RectVector();
+                    let eyeMat = faceMat.getRoiRect(face);
+                    eyeClassifier.detectMultiScale(eyeMat, eyeVect);
+                    for (let i = 0; i < eyeVect.size(); i++) {
+                        let eye = eyeVect.get(i);
+                        eyes.push(new cv.Rect(face.x + eye.x, face.y + eye.y, eye.width, eye.height));
+                    }
+                    eyeMat.delete();
+                    eyeVect.delete();
+                }
+            }
+            faceMat.delete();
+            faceVect.delete();
+        } else {
+            if (detectEye.checked) {
+                let eyeVect = new cv.RectVector();
+                let eyeMat = new cv.Mat();
+                cv.pyrDown(grayMat, eyeMat);
+                size = eyeMat.size();
+                eyeClassifier.detectMultiScale(eyeMat, eyeVect);
+                for (let i = 0; i < eyeVect.size(); i++) {
+                    let eye = eyeVect.get(i);
+                    eyes.push(new cv.Rect(eye.x, eye.y, eye.width, eye.height));
+                }
+                eyeMat.delete();
+                eyeVect.delete();
+            }
+        }
+        canvasOutputCtx.drawImage(canvasInput, 0, 0, videoWidth, videoHeight);
+        drawResults(canvasOutputCtx, faces, 'red', size);
+        drawResults(canvasOutputCtx, eyes, 'yellow', size);
+        stats.end();
+        requestAnimationFrame(processVideo);
+    }
+
+    function drawResults(ctx, results, color, size) {
+        for (let i = 0; i < results.length; ++i) {
+            let rect = results[i];
+            let xRatio = videoWidth/size.width;
+            let yRatio = videoHeight/size.height;
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = color;
+            ctx.strokeRect(rect.x*xRatio, rect.y*yRatio, rect.width*xRatio, rect.height*yRatio);
+        }
+    }
+
+    function stopVideoProcessing() {
+        if (src != null && !src.isDeleted()) src.delete();
+        if (dstC1 != null && !dstC1.isDeleted()) dstC1.delete();
+        if (dstC3 != null && !dstC3.isDeleted()) dstC3.delete();
+        if (dstC4 != null && !dstC4.isDeleted()) dstC4.delete();
+    }
+
+    function stopCamera() {
+        stream.getVideoTracks()[0].stop();
+        streaming = false;
+
+        if (!streaming) return;
+        stopVideoProcessing();
+        document.getElementById("canvasOutput").getContext("2d").clearRect(0, 0, width, height);
+        video.pause();
+        video.srcObject=null;
+        //stream.getVideoTracks()[0].stop();
+       // streaming = false;
+    }
+
+    function initUI() {
+        stats = new Stats();
+        stats.showPanel(0);
+        document.getElementById('container').appendChild(stats.dom);
+    }
+
+    function encodbase64() {
+        var canvas = document.getElementById('canvasOutput2');
+        var ctx = canvas.getContext('2d');
+        //ctx.beginPath();
+        //ctx.arc(100, 100, 50, 1.5 * Math.PI, 0.5 * Math.PI, false);
+        //ctx.lineWidth = 10;
+        //ctx.stroke();
+        var imgData = canvas.toDataURL("myimage/png");
+        $.ajax({
+            type: 'POST',
+            url:'http://localhost:8080/base',
+            data:'name='+ imgData,
+            success: function(msg){
+                alert('wow' +JSON.stringify(msg));
+            }
+        });
+        //alert('the size of base 64 is : '+imgData);
+       // var base64 = canvas.toDataURL("image/jpeg");
+
+    }
+    function takImage() {
+
+        {
+            let src = cv.imread('canvasOutput');
+            let gray = new cv.Mat();
+            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+            let faces = new cv.RectVector();
+            let eyes = new cv.RectVector();
+            let faceCascade = new cv.CascadeClassifier();
+            let eyeCascade = new cv.CascadeClassifier();
+// load pre-trained classifiers
+            faceCascade.load('haarcascade_frontalface_default.xml');
+            eyeCascade.load('haarcascade_eye.xml');
+// detect faces
+            let msize = new cv.Size(0, 0);
+            faceCascade.detectMultiScale(gray, faces, 1.1, 3, 0, msize, msize);
+            for (let i = 0; i < faces.size(); ++i) {
+                let roiGray = gray.roi(faces.get(i));
+                let roiSrc = src.roi(faces.get(i));
+                let point1 = new cv.Point(faces.get(i).x, faces.get(i).y);
+                let point2 = new cv.Point(faces.get(i).x + faces.get(i).width,
+                    faces.get(i).y + faces.get(i).height);
+                cv.rectangle(src, point1, point2, [255, 0, 0, 255]);
+                // detect eyes in face ROI
+                eyeCascade.detectMultiScale(roiGray, eyes);
+                for (let j = 0; j < eyes.size(); ++j) {
+                    let point1 = new cv.Point(eyes.get(j).x, eyes.get(j).y);
+                    let point2 = new cv.Point(eyes.get(j).x + eyes.get(j).width,
+                        eyes.get(j).y + eyes.get(j).height);
+                    cv.rectangle(roiSrc, point1, point2, [0, 0, 255, 255]);
+                }
+                roiGray.delete(); roiSrc.delete();
+            }
+            cv.imshow('canvasOutput2', src);
+            src.delete(); gray.delete(); faceCascade.delete();
+            eyeCascade.delete(); faces.delete(); eyes.delete();
+
+
+        }
+    }
+    function opencvIsReady() {
+        console.log('OpenCV.js is ready');
+        initUI();
+        //startCamera();
+    }
+</script>
+<script type="text/javascript">
+
+
+</script>
+
+
+
+
+</html>
